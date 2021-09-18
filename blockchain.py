@@ -4,6 +4,10 @@ from time import time
 from flask import Flask, jsonify, request 
 from uuid import uuid4
 from flask.wrappers import Response
+from urllib.parse import urlparse 
+import requests
+from werkzeug.wrappers import response 
+
 
 #instantiate our node
 app = Flask(__name__)
@@ -18,6 +22,73 @@ class Blockchain(object):
 
         #create the genesis block
         self.new_block(previous_hash = '1', proof = 100)
+
+        self.nodes = set()
+
+    def register_node(self, address):
+        """
+        add a new node to the list of nodes
+        :param address: Address of node. eg. 'http://192.168.0.5:5000'
+        """
+        parsed_url = urlparse(address)
+        self.nodes.add(parsed_url.netloc)
+
+    def valid_chain(self, chain):
+        """determine if a given blockchain is valid
+        :param chain: A blockchain
+        :return: True if valid, False if not
+        """
+        last_block = chain[0]
+        current_index = 1
+
+        while current_index < len(chain):
+            block = chain[current_index]
+            print(last_block)
+            print(block)
+            print("\n--------\n")
+            
+            #check that the hash of the previous block is correct
+
+            if block["previous_hash"] != self.hash(last_block):
+                print("Previous hash does not match")
+                return False
+
+            if not self.valid_proof(block):
+                print("Block proof of work is invalid")
+                return False
+
+            last_block = block
+            current_index += 1
+
+        return True
+
+    def resolve_conflict(self):
+        """
+        This is our consensus algorith, it resolves conflicts
+        by replaceing our chain with the longest one in the network
+        return: True if our chain was replaced, False if not
+        """
+        neighbours = self.nodes
+        new_chain = None
+        #We're only looking for chains Longer than ours
+        max_length = len(self.chain)
+        #Grab and verify the chains from all the other nodes in our netwrok
+        for node in neighbours:
+            response = requests.get(f'http://{node}/chain')
+            if response.status_code == 200:
+                length = response.json()['length']
+                chain = response.json()['chain']
+                #check if the lentgh is longer and the cain is valid
+                if length > max_length and self.valid_chain(chain):
+                    max_length = length
+                    new_chain = chain
+
+        #replace our chain if we're discovered a new valid chain, Longer than ours
+        if new_chain:
+            self.chain = new_chain
+            return True
+
+        return False
 
     def new_block(self, proof, previous_hash = None):
         #create a new Block & adds it to the chain. 
@@ -57,6 +128,8 @@ class Blockchain(object):
             'amount'    : amount
         })
         return self.last_block['index'] + 1
+
+
 
 
     @staticmethod
@@ -183,8 +256,52 @@ def mine():
 
     return jsonify(response), 200
 
+    # First the register_nodes() function (this connection is NOT bi-directional): 
+@app.route('/nodes/register', methods = ['POST'])
+def register_nodes():
+    values = request.get_json()
+
+    nodes = values.get('nodes')
+
+    if nodes is None:
+        return "Error: Please supply a valid list of nodes", 400
+
+    for node in nodes:
+        blockchain.register_node(node)
+
+    response = {
+        'message' : 'New nodes have been added',
+        'total_nodes' : list(blockchain.nodes)
+    }
+    return jsonify(response), 201
+
+    # Then the consensus() function:
+
+@app.route('/nodes/resolve', methods = ['GET'])
+def consesus():
+    replaced = blockchain.resolve_conflict()
+
+    if replaced:
+        response = {
+            'message' : 'Our chain was replaced',
+            'new_chain' : blockchain.chain
+        }
+    
+    else:
+        response = {
+            'message' : 'Our chain is authoritative',
+            'chain' : blockchain.chain
+        }
+    return jsonify(response), 200
 
 #8.	Run the server on port 5000. 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser()
+    parser.add_argument('-p', '--port', default=5000, type=int, 
+                        help='port to listen on')
+    args = parser.parse_args()
+
+    app.run(host='0.0.0.0', port=args.port)
